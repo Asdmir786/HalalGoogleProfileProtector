@@ -1,0 +1,10 @@
+﻿.venv/
+.dist/
+build/
+dist/
+__pycache__/
+*.pyc
+.nuitka-*
+*.spec
+*.log
+*.pdb
