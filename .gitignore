@@ -1,7 +1,10 @@
-﻿.venv/
-.dist/
-build/
+﻿# Build metadata
+*.egg-info/
+src/*.egg-info/
+# Virtual envs and build outputs
+.venv/
 dist/
+build/
 __pycache__/
 *.pyc
 .nuitka-*
