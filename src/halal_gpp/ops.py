@@ -15,7 +15,6 @@ from .crypto_core import (
     create_encryptor,
     derive_base_key,
     derive_subkeys,
-    hash_secret_raw,  # type: ignore
     mac_header,
     read_header,
     write_header,
@@ -174,7 +173,6 @@ def decrypt_archive(
         kdf = header.get("kdf")
         if kdf != "argon2id":
             raise ValueError("Unsupported KDF")
-        kdf_salt = zstd.bytes_view(bytes())  # placeholder, will be replaced
         from base64 import b64decode
 
         kdf_salt = b64decode(header["kdf_salt"])  # type: ignore
@@ -182,26 +180,8 @@ def decrypt_archive(
         params = KdfParams(kp["t"], kp["m"], kp["p"])  # type: ignore
         hkdf_salt = b64decode(header["hkdf_salt"])  # type: ignore
         nonce = b64decode(header["nonce"])  # type: ignore
-        pwd_hash = header.get("pwd_hash", "")
-
-        # Quick password check using encoded argon2 string in header
-        from argon2.low_level import verify_secret, Type as Argon2Type
-
-        try:
-            verify_secret(pwd_hash.encode("utf-8"), password.encode("utf-8"))
-        except Exception:
-            raise ValueError("Incorrect password")
-
         base_key = derive_base_key(password, kdf_salt, params)
         enc_key, hdr_key = derive_subkeys(base_key, hkdf_salt)
-
-        # Verify header MAC
-        mac = f.read(0)  # noop to keep position clear (already consumed in read_header)
-        import json as _json
-        from cryptography.hazmat.primitives import hashes, hmac
-
-        # We need header_json to recompute MAC, read_header already returned it
-        # read_header consumed MAC too, so we need to re-open to reread MAC bytes
 
     # Reopen to compute body offsets and stream-decrypt
     with open(archive_file, "rb") as f:
