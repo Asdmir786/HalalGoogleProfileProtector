@@ -11,3 +11,8 @@ __pycache__/
 *.spec
 *.log
 *.pdb
+*.dist
+*.build
+*.onefile-build
+entry_build_temp.py
+HalalGPP.exe
