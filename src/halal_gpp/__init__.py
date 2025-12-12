@@ -1,2 +1,8 @@
+import importlib.metadata
+
 __all__ = ["main"]
-__version__ = "1.0.0"
+
+try:
+    __version__ = importlib.metadata.version("halal-gpp")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0"

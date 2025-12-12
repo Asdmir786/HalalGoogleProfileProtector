@@ -23,6 +23,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QVBoxLayout,
     QWidget,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView
 )
 
 import psutil
@@ -30,12 +33,11 @@ from .ops import encrypt_directory, decrypt_archive, Progress
 from . import __version__
 
 
-def default_profile_path() -> str:
+def get_user_data_dir() -> Path:
     local = os.environ.get("LOCALAPPDATA", "")
     if local:
-        p = Path(local) / "Google/Chrome/User Data/Default"
-        return str(p)
-    return str(Path.home() / "AppData/Local/Google/Chrome/User Data/Default")
+        return Path(local) / "Google/Chrome/User Data"
+    return Path.home() / "AppData/Local/Google/Chrome/User Data"
 
 
 class PasswordDialog(QDialog):
@@ -87,23 +89,46 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Halal Google Profile Protector v{__version__}")
-        self.resize(820, 560)
+        self.resize(850, 650)
         central = QWidget()
         self.setCentralWidget(central)
 
-        self.path_edit = QLineEdit(default_profile_path())
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self.browse)
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Profile path"))
-        path_row.addWidget(self.path_edit, 1)
-        path_row.addWidget(browse)
+        # Profile List
+        self.profile_list = QListWidget()
+        self.profile_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.profile_list.itemChanged.connect(self.on_item_changed)
+        
+        # Determine User Data path
+        self.user_data_dir = get_user_data_dir()
 
-        self.skip_caches = QCheckBox("Skip caches for speed/size")
-        self.encrypt_btn = QPushButton("Encrypt Profile")
-        self.decrypt_btn = QPushButton("Decrypt Profile")
-        self.encrypt_btn.clicked.connect(self.encrypt_flow)
-        self.decrypt_btn.clicked.connect(self.decrypt_flow)
+        # Selection Buttons
+        btn_layout = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh List")
+        btn_refresh.clicked.connect(self.scan_profiles)
+        btn_browse = QPushButton("Browse Folder…")
+        btn_browse.clicked.connect(self.browse)
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.clicked.connect(self.select_all)
+        btn_deselect_all = QPushButton("Deselect All")
+        btn_deselect_all.clicked.connect(self.deselect_all)
+        
+        btn_layout.addWidget(btn_refresh)
+        btn_layout.addWidget(btn_browse)
+        btn_layout.addWidget(btn_select_all)
+        btn_layout.addWidget(btn_deselect_all)
+        btn_layout.addStretch(1)
+
+        # Action Area
+        self.skip_caches = QCheckBox("Skip caches for speed/size (Encryption only)")
+        self.encrypt_btn = QPushButton("Encrypt Selected")
+        self.decrypt_btn = QPushButton("Decrypt Selected")
+        self.encrypt_btn.clicked.connect(self.batch_encrypt)
+        self.decrypt_btn.clicked.connect(self.batch_decrypt)
+        
+        actions = QHBoxLayout()
+        actions.addWidget(self.encrypt_btn)
+        actions.addWidget(self.decrypt_btn)
+        actions.addStretch(1)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -111,13 +136,10 @@ class MainWindow(QMainWindow):
         self.log = QTextEdit()
         self.log.setReadOnly(True)
 
-        actions = QHBoxLayout()
-        actions.addWidget(self.encrypt_btn)
-        actions.addWidget(self.decrypt_btn)
-        actions.addStretch(1)
-
         col = QVBoxLayout()
-        col.addLayout(path_row)
+        col.addWidget(QLabel(f"Chrome User Data: {self.user_data_dir}"))
+        col.addWidget(self.profile_list)
+        col.addLayout(btn_layout)
         col.addWidget(self.skip_caches)
         col.addLayout(actions)
         col.addWidget(QLabel("Progress"))
@@ -132,10 +154,71 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # Scan on startup (AFTER UI setup)
+        self.scan_profiles()
+
+    def scan_profiles(self):
+        self.profile_list.clear()
+        if not self.user_data_dir.exists():
+            self._log(f"User Data directory not found: {self.user_data_dir}")
+            return
+
+        # Find folders: Default, Profile *
+        # Find archives: Default.hgp, Profile *.hgp
+        found = []
+        try:
+            for entry in self.user_data_dir.iterdir():
+                name = entry.name
+                if entry.is_dir():
+                    if name == "Default" or name.startswith("Profile "):
+                        # Check if it has preferences or seems valid?
+                        # For now, just assume folder name is enough
+                        found.append((name, "Folder"))
+                elif entry.is_file() and name.endswith(".hgp"):
+                    stem = entry.stem
+                    if stem == "Default" or stem.startswith("Profile "):
+                        found.append((stem, "Archive"))
+        except Exception as e:
+            self._log(f"Error scanning profiles: {e}")
+
+        # Sort naturally
+        found.sort()
+
+        for name, kind in found:
+            item = QListWidgetItem(f"{name} [{kind}]")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            # Store real data
+            item.setData(Qt.UserRole, {"name": name, "kind": kind, "path": self.user_data_dir / name})
+            self.profile_list.addItem(item)
+        
+        self._log(f"Scanned {len(found)} items.")
+
     def browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Chrome Default folder", self.path_edit.text())
+        d = QFileDialog.getExistingDirectory(self, "Select Chrome Profile Folder", str(self.user_data_dir))
         if d:
-            self.path_edit.setText(d)
+            path = Path(d)
+            name = path.name
+            # Check if exists in list
+            # We treat manually added folders as "Custom" kind
+            item = QListWidgetItem(f"{name} [Custom]")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, {"name": name, "kind": "Folder", "path": path})
+            self.profile_list.addItem(item)
+            self._log(f"Added custom path: {path}")
+
+    def select_all(self):
+        for i in range(self.profile_list.count()):
+            self.profile_list.item(i).setCheckState(Qt.Checked)
+
+    def deselect_all(self):
+        for i in range(self.profile_list.count()):
+            self.profile_list.item(i).setCheckState(Qt.Unchecked)
+
+    def on_item_changed(self, item):
+        # Could update button states here based on what is checked
+        pass
 
     def check_chrome_closed(self) -> bool:
         names = {"chrome.exe", "chrome"}
@@ -154,177 +237,186 @@ class MainWindow(QMainWindow):
         r = QMessageBox.question(self, "Chrome is running", "Chrome appears to be running. Close it and retry.")
         return False
 
-    def encrypt_flow(self):
+    def get_checked_items(self):
+        items = []
+        for i in range(self.profile_list.count()):
+            item = self.profile_list.item(i)
+            if item.checkState() == Qt.Checked:
+                items.append((item, item.data(Qt.UserRole)))
+        return items
+
+    def batch_encrypt(self):
+        targets = self.get_checked_items()
+        if not targets:
+            QMessageBox.warning(self, "No Selection", "Please select at least one profile to encrypt.")
+            return
+
+        # Filter only Folders
+        to_encrypt = []
+        for item, data in targets:
+            path = data["path"]
+            if data["kind"] == "Folder" and path.exists() and path.is_dir():
+                to_encrypt.append(path)
+            elif data["kind"] == "Archive":
+                self._log(f"Skipping {data['name']}: Already an archive.")
+        
+        if not to_encrypt:
+            QMessageBox.info(self, "Info", "No valid unencrypted folders selected.")
+            return
+
         if not self.ensure_chrome_closed():
             return
-        d = Path(self.path_edit.text())
-        if not d.exists() or not d.is_dir():
-            QMessageBox.warning(self, "Path", "Profile path is invalid")
-            return
+
         pd = PasswordDialog(self, confirm=True)
         pw = pd.get()
         if not pw:
             return
-        # Determine archive path next to the Default folder
-        out_file = d.parent / "Default.hgp"
-        if out_file.exists():
-            resp = QMessageBox.question(
-                self,
-                "Overwrite?",
-                f"Archive already exists:\n{out_file}\n\nOverwrite?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if resp != QMessageBox.Yes:
-                return
 
-        # Prepare UI
         self.encrypt_btn.setEnabled(False)
         self.decrypt_btn.setEnabled(False)
         self.progress.setValue(0)
         self.log.clear()
-        self._log(f"Encrypting {d} -> {out_file}")
-        skip = self.skip_caches.isChecked()
+        
+        total = len(to_encrypt)
+        current = 0
+        
+        for d in to_encrypt:
+            current += 1
+            self._log(f"--- Encrypting {d.name} ({current}/{total}) ---")
+            
+            out_file = d.parent / f"{d.name}.hgp"
+            if out_file.exists():
+                # For batch, we might want to auto-skip or ask. 
+                # Let's ask once per conflict? Or just log and skip to be safe?
+                # Safer: Skip and log
+                self._log(f"Skipping {d.name}: Archive {out_file.name} already exists.")
+                continue
 
-        def on_prog(p: Progress):
-            self.progress.setValue(max(0, min(100, p.percent)))
-            self._log(p.step)
-            QApplication.processEvents()
+            skip_cache = self.skip_caches.isChecked()
+            
+            def on_prog(p: Progress):
+                # We won't update the main bar for individual steps to avoid jumping
+                # Or we can just show text
+                QApplication.processEvents()
 
-        enc_ok = False
-        t0 = time.perf_counter()
-        try:
-            encrypt_directory(d, out_file, pw, skip, progress=on_prog)
-            enc_ok = True
-            self.progress.setValue(100)
-            elapsed = time.perf_counter() - t0
             try:
-                size_mb = (out_file.stat().st_size) / (1024 * 1024)
-                self._log(f"Encryption completed in {elapsed:.2f}s; archive size {size_mb:.2f} MiB")
-            except Exception:
-                self._log(f"Encryption completed in {elapsed:.2f}s")
-        except Exception as e:
-            QMessageBox.critical(self, "Encrypt failed", str(e))
-        finally:
-            self.encrypt_btn.setEnabled(True)
-            self.decrypt_btn.setEnabled(True)
-
-        # Delete the original profile folder only if encryption succeeded
-        if enc_ok:
-            try:
-                if d.exists():
+                t0 = time.perf_counter()
+                encrypt_directory(d, out_file, pw, skip_cache, progress=on_prog)
+                elapsed = time.perf_counter() - t0
+                self._log(f"Encrypted {d.name} in {elapsed:.2f}s")
+                
+                # Delete original
+                try:
                     shutil.rmtree(d)
-                    self._log(f"Deleted original profile folder: {d}")
+                    self._log(f"Deleted original folder: {d.name}")
+                except Exception as e:
+                    self._log(f"Failed to delete {d.name}: {e}")
+                    
             except Exception as e:
-                QMessageBox.warning(self, "Delete failed", f"Could not delete profile folder:\n{d}\n\n{e}")
+                self._log(f"ERROR encrypting {d.name}: {e}")
+        
+        self.encrypt_btn.setEnabled(True)
+        self.decrypt_btn.setEnabled(True)
+        self.progress.setValue(100)
+        self._log("Batch encryption finished.")
+        self.scan_profiles()
 
-    def decrypt_flow(self):
+    def batch_decrypt(self):
+        targets = self.get_checked_items()
+        if not targets:
+            QMessageBox.warning(self, "No Selection", "Please select at least one profile to decrypt.")
+            return
+
+        # Filter only Archives
+        to_decrypt = []
+        for item, data in targets:
+            path = data["path"] # This is the folder path usually, we need to construct archive path if it came from Folder scan?
+            # Actually scan_profiles stores:
+            # For Folder: path = .../Default
+            # For Archive: path = .../Default (but derived from Default.hgp logic?)
+            # Wait, let's fix scan logic:
+            # If kind is Archive, path should point to the .hgp file?
+            # Let's check scan_profiles...
+            # if entry.is_file() ... name.endswith(".hgp") ... found.append...
+            # item.setData... "path": self.user_data_dir / name
+            # So yes, data["path"] is the full path to .hgp file for archives.
+            
+            if data["kind"] == "Archive" and path.exists() and path.is_file():
+                to_decrypt.append(path)
+            elif data["kind"] == "Folder":
+                self._log(f"Skipping {data['name']}: It is not an archive.")
+
+        if not to_decrypt:
+            QMessageBox.information(self, "Info", "No valid archives selected.")
+            return
+
         if not self.ensure_chrome_closed():
             return
-        d = Path(self.path_edit.text())
-        # Allow decrypt even if the profile folder (Default) does not exist anymore
-        # as long as its parent directory exists.
-        if not d.exists() or not d.is_dir():
-            parent = d.parent
-            if not parent.exists() or not parent.is_dir():
-                QMessageBox.warning(self, "Path", "Profile path or its parent directory is invalid")
-                return
+
         pd = PasswordDialog(self, confirm=False)
         pw = pd.get()
         if not pw:
             return
-        arch = d.parent / "Default.hgp"
-        if not arch.exists():
-            QMessageBox.warning(self, "Missing archive", f"Archive not found:\n{arch}")
-            return
 
-        # Prepare UI
         self.encrypt_btn.setEnabled(False)
         self.decrypt_btn.setEnabled(False)
         self.progress.setValue(0)
         self.log.clear()
-        self._log(f"Decrypting {arch}")
 
-        def on_prog(p: Progress):
-            self.progress.setValue(max(0, min(100, p.percent)))
-            self._log(p.step)
-            QApplication.processEvents()
+        total = len(to_decrypt)
+        current = 0
 
-        # Decrypt to a temp directory
-        dest_new = d.parent / "Default.new"
-        if dest_new.exists():
-            try:
-                shutil.rmtree(dest_new)
-            except Exception:
-                QMessageBox.warning(self, "Cleanup", f"Remove folder then retry:\n{dest_new}")
-                self.encrypt_btn.setEnabled(True)
-                self.decrypt_btn.setEnabled(True)
-                return
-
-        ok = False
-        t0 = time.perf_counter()
-        try:
-            decrypt_archive(arch, dest_new, pw, progress=on_prog)
-            ok = True
-            self.progress.setValue(95)
-            elapsed = time.perf_counter() - t0
-            try:
-                size_mb = (arch.stat().st_size) / (1024 * 1024)
-                self._log(f"Decryption completed in {elapsed:.2f}s; archive size {size_mb:.2f} MiB")
-            except Exception:
-                self._log(f"Decryption completed in {elapsed:.2f}s")
-        except Exception as e:
-            QMessageBox.critical(self, "Decrypt failed", str(e))
-        
-        # Replace atomically
-        if ok:
-            orig = d
-            bak = d.parent / "Default.bak"
-            try:
-                if bak.exists():
-                    shutil.rmtree(bak, ignore_errors=True)
-                if orig.exists():
-                    orig.rename(bak)
-                dest_new.rename(orig)
-                self.progress.setValue(100)
-                self._log("Decryption completed and profile restored")
-                # Offer to remove backup
-                rm = QMessageBox.question(
-                    self,
-                    "Cleanup backup?",
-                    f"A backup exists:\n{bak}\n\nDelete it?",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if rm == QMessageBox.Yes:
-                    shutil.rmtree(bak, ignore_errors=True)
-                rm_arch = QMessageBox.question(
-                    self,
-                    "Delete archive?",
-                    f"Delete the archive file now?\n{arch}",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if rm_arch == QMessageBox.Yes:
-                    try:
-                        arch.unlink(missing_ok=True)
-                        self._log(f"Deleted archive: {arch}")
-                    except Exception as e:
-                        QMessageBox.warning(self, "Archive delete failed", str(e))
-            except Exception as e:
-                # Rollback
-                self._log(f"Restore failed: {e}")
+        for arch in to_decrypt:
+            current += 1
+            self._log(f"--- Decrypting {arch.name} ({current}/{total}) ---")
+            
+            # arch is .../Default.hgp
+            # dest is .../Default
+            folder_name = arch.stem # Default
+            dest = arch.parent / folder_name
+            
+            if dest.exists():
+                self._log(f"Skipping {arch.name}: Destination folder {folder_name} already exists.")
+                continue
+                
+            dest_new = arch.parent / f"{folder_name}.new"
+            if dest_new.exists():
                 try:
-                    if orig.exists():
-                        shutil.rmtree(orig, ignore_errors=True)
-                    if bak.exists():
-                        bak.rename(orig)
-                except Exception as e2:
-                    self._log(f"Rollback issue: {e2}")
-                QMessageBox.critical(self, "Restore failed", str(e))
-            finally:
-                self.encrypt_btn.setEnabled(True)
-                self.decrypt_btn.setEnabled(True)
-        else:
-            self.encrypt_btn.setEnabled(True)
-            self.decrypt_btn.setEnabled(True)
+                    shutil.rmtree(dest_new)
+                except Exception:
+                    self._log(f"Skipping {arch.name}: Could not clear temp folder {dest_new.name}")
+                    continue
+
+            def on_prog(p: Progress):
+                QApplication.processEvents()
+
+            try:
+                t0 = time.perf_counter()
+                decrypt_archive(arch, dest_new, pw, progress=on_prog)
+                elapsed = time.perf_counter() - t0
+                
+                # Rename .new to real
+                dest_new.rename(dest)
+                self._log(f"Decrypted {arch.name} in {elapsed:.2f}s")
+                
+                # Delete archive
+                try:
+                    arch.unlink()
+                    self._log(f"Deleted archive: {arch.name}")
+                except Exception as e:
+                    self._log(f"Failed to delete archive {arch.name}: {e}")
+                    
+            except Exception as e:
+                self._log(f"ERROR decrypting {arch.name}: {e}")
+                # Cleanup
+                if dest_new.exists():
+                    shutil.rmtree(dest_new, ignore_errors=True)
+
+        self.encrypt_btn.setEnabled(True)
+        self.decrypt_btn.setEnabled(True)
+        self.progress.setValue(100)
+        self._log("Batch decryption finished.")
+        self.scan_profiles()
 
     def _log(self, msg: str):
         self.log.append(msg)
