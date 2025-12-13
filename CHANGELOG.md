@@ -2,6 +2,17 @@
 
 All notable changes to the **Halal Google Profile Protector** project will be documented in this file.
 
+## [2.0.1] - 2025-12-13
+### 🐛 Fixes
+- Prevented UI freezing during batch encrypt/decrypt by moving work to a background thread.
+- Added overwrite/skip prompt when decrypting into existing profile folders.
+- Improved `.hgp` archive path handling and conflict checks for batch operations.
+
+### 🛠 Chore
+- Bumped project version to 2.0.1 in `pyproject.toml`.
+
+---
+
 ## [2.0.0] - 2025-12-12
 ### 🚀 Features
 - **Multi-Profile Support**: Completely replaced single-path input with a scrollable **Checklist UI** for managing multiple profiles.

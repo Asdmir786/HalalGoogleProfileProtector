@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -85,6 +85,109 @@ class PasswordDialog(QDialog):
         return None
 
 
+class Worker(QThread):
+    progress_update = Signal(int)
+    log_update = Signal(str)
+    finished_task = Signal()
+    
+    def __init__(self, mode, targets, password, skip_caches=False, overwrite=False):
+        super().__init__()
+        self.mode = mode # 'encrypt' or 'decrypt'
+        self.targets = targets
+        self.password = password
+        self.skip_caches = skip_caches
+        self.overwrite = overwrite
+        self._stop = False
+
+    def run(self):
+        total = len(self.targets)
+        current = 0
+        
+        if self.mode == 'encrypt':
+            for d in self.targets:
+                if self._stop: break
+                current += 1
+                self.log_update.emit(f"--- Encrypting {d.name} ({current}/{total}) ---")
+                
+                out_file = d.parent / f"{d.name}.hgp"
+                if out_file.exists():
+                    self.log_update.emit(f"Skipping {d.name}: Archive {out_file.name} already exists.")
+                    continue
+
+                def on_prog(p: Progress):
+                    # We can maybe use p.percent for a granular bar, but for batch 
+                    # let's just pulsate or keep it simple.
+                    pass
+
+                try:
+                    t0 = time.perf_counter()
+                    encrypt_directory(d, out_file, self.password, self.skip_caches, progress=on_prog)
+                    elapsed = time.perf_counter() - t0
+                    self.log_update.emit(f"Encrypted {d.name} in {elapsed:.2f}s")
+                    
+                    try:
+                        shutil.rmtree(d)
+                        self.log_update.emit(f"Deleted original folder: {d.name}")
+                    except Exception as e:
+                        self.log_update.emit(f"Failed to delete {d.name}: {e}")
+                        
+                except Exception as e:
+                    self.log_update.emit(f"ERROR encrypting {d.name}: {e}")
+                    
+        elif self.mode == 'decrypt':
+            for arch in self.targets:
+                if self._stop: break
+                current += 1
+                self.log_update.emit(f"--- Decrypting {arch.name} ({current}/{total}) ---")
+                
+                folder_name = arch.stem
+                dest = arch.parent / folder_name
+                
+                if dest.exists():
+                    if self.overwrite:
+                        self.log_update.emit(f"Overwrite selected: Removing existing folder {folder_name}...")
+                        try:
+                            shutil.rmtree(dest)
+                        except Exception as e:
+                            self.log_update.emit(f"ERROR: Could not delete {folder_name}: {e}")
+                            continue
+                    else:
+                        self.log_update.emit(f"Skipping {arch.name}: Destination folder {folder_name} already exists.")
+                        continue
+                    
+                dest_new = arch.parent / f"{folder_name}.new"
+                if dest_new.exists():
+                    try:
+                        shutil.rmtree(dest_new)
+                    except Exception:
+                        self.log_update.emit(f"Skipping {arch.name}: Could not clear temp folder {dest_new.name}")
+                        continue
+
+                def on_prog(p: Progress):
+                    pass
+
+                try:
+                    t0 = time.perf_counter()
+                    decrypt_archive(arch, dest_new, self.password, progress=on_prog)
+                    elapsed = time.perf_counter() - t0
+                    
+                    dest_new.rename(dest)
+                    self.log_update.emit(f"Decrypted {arch.name} in {elapsed:.2f}s")
+                    
+                    try:
+                        arch.unlink()
+                        self.log_update.emit(f"Deleted archive: {arch.name}")
+                    except Exception as e:
+                        self.log_update.emit(f"Failed to delete archive {arch.name}: {e}")
+                        
+                except Exception as e:
+                    self.log_update.emit(f"ERROR decrypting {arch.name}: {e}")
+                    if dest_new.exists():
+                        shutil.rmtree(dest_new, ignore_errors=True)
+
+        self.finished_task.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -93,15 +196,12 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # Profile List
         self.profile_list = QListWidget()
         self.profile_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.profile_list.itemChanged.connect(self.on_item_changed)
         
-        # Determine User Data path
         self.user_data_dir = get_user_data_dir()
 
-        # Selection Buttons
         btn_layout = QHBoxLayout()
         btn_refresh = QPushButton("Refresh List")
         btn_refresh.clicked.connect(self.scan_profiles)
@@ -118,7 +218,6 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(btn_deselect_all)
         btn_layout.addStretch(1)
 
-        # Action Area
         self.skip_caches = QCheckBox("Skip caches for speed/size (Encryption only)")
         self.encrypt_btn = QPushButton("Encrypt Selected")
         self.decrypt_btn = QPushButton("Decrypt Selected")
@@ -131,8 +230,9 @@ class MainWindow(QMainWindow):
         actions.addStretch(1)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
+        self.progress.setRange(0, 0) # Indeterminate by default when working
+        self.progress.hide()
+        
         self.log = QTextEdit()
         self.log.setReadOnly(True)
 
@@ -154,7 +254,7 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        # Scan on startup (AFTER UI setup)
+        self.worker = None
         self.scan_profiles()
 
     def scan_profiles(self):
@@ -163,16 +263,12 @@ class MainWindow(QMainWindow):
             self._log(f"User Data directory not found: {self.user_data_dir}")
             return
 
-        # Find folders: Default, Profile *
-        # Find archives: Default.hgp, Profile *.hgp
         found = []
         try:
             for entry in self.user_data_dir.iterdir():
                 name = entry.name
                 if entry.is_dir():
                     if name == "Default" or name.startswith("Profile "):
-                        # Check if it has preferences or seems valid?
-                        # For now, just assume folder name is enough
                         found.append((name, "Folder"))
                 elif entry.is_file() and name.endswith(".hgp"):
                     stem = entry.stem
@@ -181,14 +277,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"Error scanning profiles: {e}")
 
-        # Sort naturally
         found.sort()
 
         for name, kind in found:
             item = QListWidgetItem(f"{name} [{kind}]")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
-            # Store real data
             item.setData(Qt.UserRole, {"name": name, "kind": kind, "path": self.user_data_dir / name})
             self.profile_list.addItem(item)
         
@@ -199,8 +293,6 @@ class MainWindow(QMainWindow):
         if d:
             path = Path(d)
             name = path.name
-            # Check if exists in list
-            # We treat manually added folders as "Custom" kind
             item = QListWidgetItem(f"{name} [Custom]")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
@@ -217,7 +309,6 @@ class MainWindow(QMainWindow):
             self.profile_list.item(i).setCheckState(Qt.Unchecked)
 
     def on_item_changed(self, item):
-        # Could update button states here based on what is checked
         pass
 
     def check_chrome_closed(self) -> bool:
@@ -245,13 +336,21 @@ class MainWindow(QMainWindow):
                 items.append((item, item.data(Qt.UserRole)))
         return items
 
+    def _lock_ui(self, locked=True):
+        self.encrypt_btn.setEnabled(not locked)
+        self.decrypt_btn.setEnabled(not locked)
+        self.profile_list.setEnabled(not locked)
+        if locked:
+            self.progress.show()
+        else:
+            self.progress.hide()
+
     def batch_encrypt(self):
         targets = self.get_checked_items()
         if not targets:
             QMessageBox.warning(self, "No Selection", "Please select at least one profile to encrypt.")
             return
 
-        # Filter only Folders
         to_encrypt = []
         for item, data in targets:
             path = data["path"]
@@ -272,54 +371,7 @@ class MainWindow(QMainWindow):
         if not pw:
             return
 
-        self.encrypt_btn.setEnabled(False)
-        self.decrypt_btn.setEnabled(False)
-        self.progress.setValue(0)
-        self.log.clear()
-        
-        total = len(to_encrypt)
-        current = 0
-        
-        for d in to_encrypt:
-            current += 1
-            self._log(f"--- Encrypting {d.name} ({current}/{total}) ---")
-            
-            out_file = d.parent / f"{d.name}.hgp"
-            if out_file.exists():
-                # For batch, we might want to auto-skip or ask. 
-                # Let's ask once per conflict? Or just log and skip to be safe?
-                # Safer: Skip and log
-                self._log(f"Skipping {d.name}: Archive {out_file.name} already exists.")
-                continue
-
-            skip_cache = self.skip_caches.isChecked()
-            
-            def on_prog(p: Progress):
-                # We won't update the main bar for individual steps to avoid jumping
-                # Or we can just show text
-                QApplication.processEvents()
-
-            try:
-                t0 = time.perf_counter()
-                encrypt_directory(d, out_file, pw, skip_cache, progress=on_prog)
-                elapsed = time.perf_counter() - t0
-                self._log(f"Encrypted {d.name} in {elapsed:.2f}s")
-                
-                # Delete original
-                try:
-                    shutil.rmtree(d)
-                    self._log(f"Deleted original folder: {d.name}")
-                except Exception as e:
-                    self._log(f"Failed to delete {d.name}: {e}")
-                    
-            except Exception as e:
-                self._log(f"ERROR encrypting {d.name}: {e}")
-        
-        self.encrypt_btn.setEnabled(True)
-        self.decrypt_btn.setEnabled(True)
-        self.progress.setValue(100)
-        self._log("Batch encryption finished.")
-        self.scan_profiles()
+        self._start_worker('encrypt', to_encrypt, pw)
 
     def batch_decrypt(self):
         targets = self.get_checked_items()
@@ -327,28 +379,67 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select at least one profile to decrypt.")
             return
 
-        # Filter only Archives
         to_decrypt = []
         for item, data in targets:
-            path = data["path"] # This is the folder path usually, we need to construct archive path if it came from Folder scan?
-            # Actually scan_profiles stores:
-            # For Folder: path = .../Default
-            # For Archive: path = .../Default (but derived from Default.hgp logic?)
-            # Wait, let's fix scan logic:
-            # If kind is Archive, path should point to the .hgp file?
-            # Let's check scan_profiles...
-            # if entry.is_file() ... name.endswith(".hgp") ... found.append...
-            # item.setData... "path": self.user_data_dir / name
-            # So yes, data["path"] is the full path to .hgp file for archives.
+            path = data["path"]
+            # Relaxed check: trust the scan results if it says "Archive", even if file check fails transiently
+            # or if the path construction was slightly off.
+            # But wait, scan_profiles constructs path as: user_data_dir / name
+            # If name is "Default", path is .../Default
+            # If kind is Archive, it was found because of .hgp extension
+            # Let's double check scan_profiles logic.
             
-            if data["kind"] == "Archive" and path.exists() and path.is_file():
-                to_decrypt.append(path)
+            # scan_profiles: 
+            # if entry.is_file() and name.endswith(".hgp"):
+            #    stem = entry.stem (e.g. "Default")
+            #    found.append((stem, "Archive"))
+            # item.setData(..., "path": self.user_data_dir / stem) -> This path is the FOLDER path (e.g. .../Default)
+            
+            # So data["path"] points to where the folder WOULD be.
+            # But for decryption, we need the ARCHIVE path (e.g. .../Default.hgp).
+            
+            if data["kind"] == "Archive":
+                # Reconstruct archive path
+                archive_path = path.parent / f"{path.name}.hgp"
+                if archive_path.exists() and archive_path.is_file():
+                    to_decrypt.append(archive_path)
+                else:
+                     self._log(f"Skipping {data['name']}: Archive file not found at {archive_path}")
             elif data["kind"] == "Folder":
                 self._log(f"Skipping {data['name']}: It is not an archive.")
 
         if not to_decrypt:
             QMessageBox.information(self, "Info", "No valid archives selected.")
             return
+
+        # Pre-check for existing folders
+        conflicts = []
+        for arch in to_decrypt:
+            folder_name = arch.stem
+            dest = arch.parent / folder_name
+            if dest.exists():
+                conflicts.append(folder_name)
+        
+        overwrite = False
+        if conflicts:
+            msg = "The following profile folders already exist and would be overwritten:\n\n"
+            msg += "\n".join(conflicts[:10])
+            if len(conflicts) > 10:
+                msg += "\n...and more."
+            msg += "\n\nDo you want to DELETE these existing folders and restore from the archives?"
+            
+            resp = QMessageBox.warning(self, "Overwrite Conflicts", msg, 
+                                       QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            
+            if resp == QMessageBox.Yes:
+                overwrite = True
+            elif resp == QMessageBox.No:
+                # Filter out conflicts
+                to_decrypt = [a for a in to_decrypt if not (a.parent / a.stem).exists()]
+                if not to_decrypt:
+                     return
+            else:
+                return # Cancel
 
         if not self.ensure_chrome_closed():
             return
@@ -358,65 +449,23 @@ class MainWindow(QMainWindow):
         if not pw:
             return
 
-        self.encrypt_btn.setEnabled(False)
-        self.decrypt_btn.setEnabled(False)
-        self.progress.setValue(0)
+        self._start_worker('decrypt', to_decrypt, pw, overwrite_existing=overwrite)
+
+    def _start_worker(self, mode, targets, password, overwrite_existing=False):
+        self._lock_ui(True)
         self.log.clear()
+        
+        skip = self.skip_caches.isChecked()
+        self.worker = Worker(mode, targets, password, skip, overwrite=overwrite_existing)
+        self.worker.log_update.connect(self._log)
+        self.worker.finished_task.connect(self._on_worker_finished)
+        self.worker.start()
 
-        total = len(to_decrypt)
-        current = 0
-
-        for arch in to_decrypt:
-            current += 1
-            self._log(f"--- Decrypting {arch.name} ({current}/{total}) ---")
-            
-            # arch is .../Default.hgp
-            # dest is .../Default
-            folder_name = arch.stem # Default
-            dest = arch.parent / folder_name
-            
-            if dest.exists():
-                self._log(f"Skipping {arch.name}: Destination folder {folder_name} already exists.")
-                continue
-                
-            dest_new = arch.parent / f"{folder_name}.new"
-            if dest_new.exists():
-                try:
-                    shutil.rmtree(dest_new)
-                except Exception:
-                    self._log(f"Skipping {arch.name}: Could not clear temp folder {dest_new.name}")
-                    continue
-
-            def on_prog(p: Progress):
-                QApplication.processEvents()
-
-            try:
-                t0 = time.perf_counter()
-                decrypt_archive(arch, dest_new, pw, progress=on_prog)
-                elapsed = time.perf_counter() - t0
-                
-                # Rename .new to real
-                dest_new.rename(dest)
-                self._log(f"Decrypted {arch.name} in {elapsed:.2f}s")
-                
-                # Delete archive
-                try:
-                    arch.unlink()
-                    self._log(f"Deleted archive: {arch.name}")
-                except Exception as e:
-                    self._log(f"Failed to delete archive {arch.name}: {e}")
-                    
-            except Exception as e:
-                self._log(f"ERROR decrypting {arch.name}: {e}")
-                # Cleanup
-                if dest_new.exists():
-                    shutil.rmtree(dest_new, ignore_errors=True)
-
-        self.encrypt_btn.setEnabled(True)
-        self.decrypt_btn.setEnabled(True)
-        self.progress.setValue(100)
-        self._log("Batch decryption finished.")
+    def _on_worker_finished(self):
+        self._lock_ui(False)
+        self._log("Operation completed.")
         self.scan_profiles()
+        self.worker = None
 
     def _log(self, msg: str):
         self.log.append(msg)
