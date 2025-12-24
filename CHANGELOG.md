@@ -2,6 +2,11 @@
 
 All notable changes to the **Halal Google Profile Protector** project will be documented in this file.
 
+## [2.0.2] - 2025-12-24
+### ✨ UI/UX
+- **Auto-Selection**: All discovered profiles are now selected by default upon scanning.
+- **Enhanced UI Locking**: All interactive buttons (Refresh, Browse, Select/Deselect) and the profile list are now strictly disabled during active encryption/decryption tasks to prevent state conflicts.
+
 ## [2.0.1] - 2025-12-13
 ### 🐛 Fixes
 - Prevented UI freezing during batch encrypt/decrypt by moving work to a background thread.

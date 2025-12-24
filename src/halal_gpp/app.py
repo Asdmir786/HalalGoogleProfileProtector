@@ -203,19 +203,19 @@ class MainWindow(QMainWindow):
         self.user_data_dir = get_user_data_dir()
 
         btn_layout = QHBoxLayout()
-        btn_refresh = QPushButton("Refresh List")
-        btn_refresh.clicked.connect(self.scan_profiles)
-        btn_browse = QPushButton("Browse Folder…")
-        btn_browse.clicked.connect(self.browse)
-        btn_select_all = QPushButton("Select All")
-        btn_select_all.clicked.connect(self.select_all)
-        btn_deselect_all = QPushButton("Deselect All")
-        btn_deselect_all.clicked.connect(self.deselect_all)
+        self.btn_refresh = QPushButton("Refresh List")
+        self.btn_refresh.clicked.connect(self.scan_profiles)
+        self.btn_browse = QPushButton("Browse Folder…")
+        self.btn_browse.clicked.connect(self.browse)
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.clicked.connect(self.select_all)
+        self.btn_deselect_all = QPushButton("Deselect All")
+        self.btn_deselect_all.clicked.connect(self.deselect_all)
         
-        btn_layout.addWidget(btn_refresh)
-        btn_layout.addWidget(btn_browse)
-        btn_layout.addWidget(btn_select_all)
-        btn_layout.addWidget(btn_deselect_all)
+        btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_browse)
+        btn_layout.addWidget(self.btn_select_all)
+        btn_layout.addWidget(self.btn_deselect_all)
         btn_layout.addStretch(1)
 
         self.skip_caches = QCheckBox("Skip caches for speed/size (Encryption only)")
@@ -282,7 +282,7 @@ class MainWindow(QMainWindow):
         for name, kind in found:
             item = QListWidgetItem(f"{name} [{kind}]")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+            item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, {"name": name, "kind": kind, "path": self.user_data_dir / name})
             self.profile_list.addItem(item)
         
@@ -337,9 +337,20 @@ class MainWindow(QMainWindow):
         return items
 
     def _lock_ui(self, locked=True):
+        # Top buttons
+        self.btn_refresh.setEnabled(not locked)
+        self.btn_browse.setEnabled(not locked)
+        self.btn_select_all.setEnabled(not locked)
+        self.btn_deselect_all.setEnabled(not locked)
+        
+        # Main list and check
+        self.profile_list.setEnabled(not locked)
+        self.skip_caches.setEnabled(not locked)
+        
+        # Action buttons
         self.encrypt_btn.setEnabled(not locked)
         self.decrypt_btn.setEnabled(not locked)
-        self.profile_list.setEnabled(not locked)
+        
         if locked:
             self.progress.show()
         else:
