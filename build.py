@@ -7,6 +7,14 @@ from pathlib import Path
 def main():
     print("🚀 Starting Official HalalGPP Builder (Nuitka powered)...")
     
+    # Check for compiler preference
+    use_msvc = "--msvc" in sys.argv
+    compiler_flag = "--mingw64" if not use_msvc else ""
+    if use_msvc:
+        print("🏗️  Using MSVC compiler (ensure Visual Studio is installed)")
+    else:
+        print("📦 Using MinGW64 compiler (Nuitka will manage this automatically)")
+
     # Define paths
     project_root = Path(__file__).parent
     dist_dir = project_root / "dist"
@@ -27,14 +35,15 @@ def main():
         "--onefile",
         "--enable-plugin=pyside6",
         "--windows-console-mode=disable",
-        # "--windows-console-mode=force",
         f"--output-filename={output_exe_name}",
         "--assume-yes-for-downloads",
         "--include-package=halal_gpp",
-        # Clean up build directory automatically
         "--remove-output", 
         str(entry_point)
     ]
+    
+    if compiler_flag:
+        cmd.insert(4, compiler_flag)
 
     print(f"🔨 Running build command: {' '.join(cmd)}")
     print("⏳ This might take a minute or two. Go grab a coffee/tea...")

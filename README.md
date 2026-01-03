@@ -9,7 +9,7 @@ Modern desktop application to secure your Chrome profiles and custom folders.
 - **Standalone**: Packaged as a high-performance Windows `.exe` via Nuitka.
 
 ## Requirements
-- Python 3.11+
+- Python 3.11+ (Python 3.12 recommended for building)
 - [uv](https://github.com/astral-sh/uv) (high-performance Python package manager)
 - Windows 10/11
 

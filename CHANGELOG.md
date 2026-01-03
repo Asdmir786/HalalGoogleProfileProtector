@@ -2,6 +2,12 @@
 
 All notable changes to the **Halal Google Profile Protector** project will be documented in this file.
 
+## [2.0.3] - 2026-01-03
+### 📦 Build
+- **Improved Builder**: Updated `build.py` to support both MinGW64 and MSVC compilers.
+- **Compiler Flexibility**: Added `--msvc` flag to `build.py` for manual compiler selection.
+- **Compatibility**: Verified Python 3.12 as the recommended version for stable Nuitka builds on Windows.
+
 ## [2.0.2] - 2025-12-24
 ### ✨ UI/UX
 - **Auto-Selection**: All discovered profiles are now selected by default upon scanning.

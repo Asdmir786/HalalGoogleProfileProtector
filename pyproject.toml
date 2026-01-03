@@ -1,6 +1,6 @@
 [project]
 name = "halal-gpp"
-version = "2.0.2"
+version = "2.0.3"
 description = "Halal Google Profile Protector"
 readme = "README.md"
 requires-python = ">=3.11"

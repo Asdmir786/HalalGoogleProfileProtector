@@ -16,3 +16,4 @@ __pycache__/
 *.onefile-build
 entry_build_temp.py
 HalalGPP.exe
+nuitka-crash-report.xml
